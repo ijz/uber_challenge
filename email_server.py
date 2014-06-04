@@ -1,16 +1,37 @@
-from flask import Flask
-from flask import request
+import flask
 import json
 import urllib2
 import urllib
 import base64
+import re
+import ConfigParser
+import argparse
+import traceback
 
-app = Flask(__name__)
+app = flask.Flask(__name__)
 
-mailgun_url = "https://api.mailgun.net/v2/sandbox6820aebf3fa44b15a0f38e7943ed6471.mailgun.org/messages"
-mailgun_api_key = "key-4pu1uxt38wn5e34i4jn74yvchg30jv82"
-mandrill_url = "https://mandrillapp.com/api/1.0/messages/send.json"
-mandrill_key = "fXmpLQuUhIuLwcNuw0H2jg"
+timeout = 1
+mailgun_url = ""
+mailgun_api_key = ""
+mandrill_url = ""
+mandrill_api_key = ""
+
+def parse_config(file):
+    config = ConfigParser.ConfigParser()
+    config.read(file)
+    global mailgun_url
+    mailgun_url = config.get("mailgun", "url")
+    global mailgun_api_key
+    mailgun_api_key = config.get("mailgun", "api_key")
+    global mandrill_url
+    mandrill_url = config.get("mandrill", "url")
+    global mandrill_api_key
+    mandrill_api_key = config.get("mandrill", "api_key")
+    
+def generate_json_response(status, content):
+    response = flask.make_response(json.dumps(content), status)
+    response.headers['Content-type'] = "application/json"
+    return response
 
 def send_mailgun_request(json_data):
     mailgun_request = urllib2.Request(mailgun_url)
@@ -23,15 +44,14 @@ def send_mailgun_request(json_data):
         "text": json_data['body']
     })
     mailgun_request.add_data(email_data)
-    results = urllib2.urlopen(mailgun_request, timeout=1)
+    results = urllib2.urlopen(mailgun_request, timeout=timeout)
     response = results.read()
     return response
-    
+
 def send_mandrill_request(json_data):
     mandrill_request = urllib2.Request(mandrill_url)
-    mandrill_request.add_header("User-agent", "Mandrill-Curl/1.0")
     email_data = json.dumps({
-        "key": mandrill_key,
+        "key": mandrill_api_key,
         "message": {
             "from_email": json_data["from"],
             "from_name": json_data["from_name"],
@@ -43,34 +63,70 @@ def send_mandrill_request(json_data):
                 }
             ],
             "subject": json_data["subject"],
-            "text":json_data['body']
+            "text":json_data["body"]
         }
     })
     mandrill_request.add_data(email_data)
-    results = urllib2.urlopen(mandrill_request, timeout=1)
+    results = urllib2.urlopen(mandrill_request, timeout=timeout)
     response = results.read()
     return response
 
-@app.route("/")
-def index():
-    return "index"
-    
 @app.route("/email", methods=["POST"])
 def email():
-    json_obj = json.loads(request.data)
+    json_obj = json.loads(flask.request.data)
+    # make sure we have all the parameters
+    for key in ["to", "to_name", "from", "from_name", "subject", "body"]:
+        if key not in json_obj:
+            return generate_json_response(500, {
+                "status": "ERROR",
+                "reason": "Required JSON parameter [%s] is missing." % key
+            })
+    # remove html tags from body
+    json_obj["body"] = re.sub(r"\<\/?p\>", "\n", json_obj["body"])
+    json_obj["body"] = re.sub(r"\<br[^\>]*\>", "\n", json_obj["body"])
+    json_obj["body"] = re.sub(r"\<[^\>]*\>", "", json_obj["body"])
     try:
         mandrill_response = send_mandrill_request(json_obj)
-        return mandrill_response
+        service_provider = "Mandrill"
+        service_message = mandrill_response
     except Exception, e:
         print "Mandrill failed. Using Mailgun"
-        print e
+        traceback.print_exc()
         try:
             mailgun_response = send_mailgun_request(json_obj)
-            return mailgun_response
-        except urllib2.URLError as e2:
+            service_provider = "Mailgun"
+            service_message = mailgun_response
+        except Exception, e2:
             print "Mailgun failed. Error."
-            print e2
-    
-if __name__ == '__main__':
-    app.debug = True
+            traceback.print_exc()
+            return generate_json_response(500, {
+                "status": "ERROR",
+                "reason": str(e2)
+            })
+    return generate_json_response(200, {
+        "status": "OK",
+        "service_provider": service_provider,
+        "service_message": service_message
+    })
+
+def main():
+    parser = argparse.ArgumentParser(description="Email sender")
+    parser.add_argument("-d", "--debug", dest="debug", action="store_true", help="Run server in debug mode")
+    parser.add_argument("-c", "--config", dest="config_file", default="config.ini", help="Mailgun & Mandrill config file location")
+    parser.add_argument("-t", "--timeout", dest="timeout", default=1.0, type=float, help="Timeout in seconds for Mandrill and Mailgun")
+    parser.add_argument("-p", "--port", dest="port", default=5000, help="Start server on this port")
+    args = parser.parse_args()
+    global timeout
+    timeout = args.timeout
+    parse_config(args.config_file)
+    if args.debug:
+        print "Mandrill API URL [%s]" % mandrill_url
+        print "Mandrill API Key [%s]" % mandrill_api_key
+        print "Mailgun API URL [%s]" % mailgun_url
+        print "Mailgun API Key [%s]" % mailgun_api_key
+    app.debug = args.debug
+    app.port = args.port
     app.run()
+
+if __name__ == '__main__':
+    main()
