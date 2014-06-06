@@ -27,11 +27,14 @@ def parse_config(file):
     mandrill_url = config.get("mandrill", "url")
     global mandrill_api_key
     mandrill_api_key = config.get("mandrill", "api_key")
-    
+
 def generate_json_response(status, content):
     response = flask.make_response(json.dumps(content), status)
     response.headers['Content-type'] = "application/json"
     return response
+
+def is_valid_email_address(address):
+    return re.match(r"[^@]*@[^\.]*\..*", address) is not None
 
 def send_mailgun_request(json_data):
     mailgun_request = urllib2.Request(mailgun_url)
@@ -73,7 +76,14 @@ def send_mandrill_request(json_data):
 
 @app.route("/email", methods=["POST"])
 def email():
-    json_obj = json.loads(flask.request.data)
+    # parse input JSON
+    try:
+        json_obj = json.loads(flask.request.get_data())
+    except ValueError, e:
+        return generate_json_response(500, {
+            "status": "ERROR",
+            "reason": "Failed to parse input JSON: %s" % str(e)
+        })
     # make sure we have all the parameters
     for key in ["to", "to_name", "from", "from_name", "subject", "body"]:
         if key not in json_obj:
@@ -81,10 +91,17 @@ def email():
                 "status": "ERROR",
                 "reason": "Required JSON parameter [%s] is missing." % key
             })
+    # validate email address
+    if not is_valid_email_address(json_obj["to"]) or not is_valid_email_address(json_obj["from"]):
+        return generate_json_response(500, {
+            "status": "ERROR",
+            "reason": "Either from or to email address is invalid. [from: '%s', to: '%s']" % (json_obj["from"], json_obj["to"])
+        })
     # remove html tags from body
     json_obj["body"] = re.sub(r"\<\/?p\>", "\n", json_obj["body"])
     json_obj["body"] = re.sub(r"\<br[^\>]*\>", "\n", json_obj["body"])
     json_obj["body"] = re.sub(r"\<[^\>]*\>", "", json_obj["body"])
+
     try:
         mandrill_response = send_mandrill_request(json_obj)
         service_provider = "Mandrill"
